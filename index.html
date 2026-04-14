@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <title>Engine Oil Analyzer v4.1 (Client-Server Architecture)</title>
+    <title>Engine Oil Analyzer v4.2 (Edge-Calibrated Client-Server Architecture)</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
     <style>
@@ -23,7 +23,7 @@
 </head>
 <body>
     <div class="container">
-        <h2>엔진 오일 정밀 분석기 (분산 클라우드 컴퓨팅)</h2>
+        <h2>엔진 오일 정밀 분석기 (사전 캘리브레이션 및 클라우드 컴퓨팅 결합)</h2>
         <div class="input-group">
             <label for="mileageInput">신규 샘플 주행거리 (km): </label>
             <input type="number" id="mileageInput" placeholder="예: 60000" required>
@@ -65,6 +65,7 @@
             document.getElementById('status').innerText = "상태: OpenCV 모듈 로드 완료.";
         }
 
+        // 이미지 파일 업로드 시 미리보기 렌더링
         document.getElementById('fileInput').addEventListener('change', function(e) {
             if (e.target.files && e.target.files[0]) {
                 const reader = new FileReader();
@@ -77,19 +78,22 @@
             }
         });
 
-        // 1. 클라이언트 측 영상 처리 (마스크 기반 RGB 추출)
+        // 1. 클라이언트 측 영상 처리 및 캘리브레이션 행렬 투영
         function extractRobustRGB(imageElement) {
             let src = cv.imread(imageElement);
             let gray = new cv.Mat();
             let blurred = new cv.Mat();
             
+            // 그레이스케일 변환 및 가우시안 블러를 통한 고주파 노이즈 제거
             cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
             cv.GaussianBlur(gray, blurred, new cv.Size(9, 9), 2, 2);
 
+            // CLAHE (Contrast Limited Adaptive Histogram Equalization) 적용
             let clahe = new cv.CLAHE(2.0, new cv.Size(8, 8));
             let gray_clahe = new cv.Mat();
             clahe.apply(blurred, gray_clahe);
 
+            // 형태학적 에지 검출 (Canny & Morphological Closing)
             let edges = new cv.Mat();
             cv.Canny(gray_clahe, edges, 50, 150);
             let kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5));
@@ -104,6 +108,7 @@
             let maxArea = 0;
             let found = false;
 
+            // 기하학적 원형도(Circularity)를 바탕으로 오일 드롭렛 마스킹
             for (let i = 0; i < contours.size(); ++i) {
                 let cnt = contours.get(i);
                 let area = cv.contourArea(cnt);
@@ -118,6 +123,7 @@
                     bestMask.setTo(new cv.Scalar(0));
                     cv.drawContours(bestMask, contours, i, new cv.Scalar(255), -1);
                     
+                    // 경계 노이즈를 제거하기 위한 침식(Erosion) 연산
                     let erodeKernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(15, 15));
                     cv.erode(bestMask, bestMask, erodeKernel, new cv.Point(-1, -1), 1);
                     erodeKernel.delete();
@@ -126,6 +132,7 @@
             }
 
             if (!found) {
+                // 페일세이프: 허프 원 변환(Hough Circle Transform)
                 let circles = new cv.Mat();
                 cv.HoughCircles(blurred, circles, cv.HOUGH_GRADIENT, 1.2, 100, 50, 30, 20, 0);
                 if (circles.cols > 0) {
@@ -134,42 +141,67 @@
                     let r = Math.round(circles.data32F[2]);
                     cv.circle(bestMask, new cv.Point(x, y), Math.round(r * 0.8), new cv.Scalar(255), -1);
                 } else {
-                    throw new Error("타겟 영역 검출 실패");
+                    throw new Error("[치명적 오류] 타겟 객체(오일 샘플)를 영상에서 분리할 수 없습니다.");
                 }
                 circles.delete();
             }
 
-            let mean = cv.mean(src, bestMask);
+            // 마스크 영역 내부의 원본 RGB 평균 추출
+            let rawMean = cv.mean(src, bestMask);
+            let rawR = rawMean[0], rawG = rawMean[1], rawB = rawMean[2];
             
+            // --- 사전 도출된 전역 캘리브레이션 행렬 (M = A^-1 * B) ---
+            // ※ 주의: 아래 행렬은 프로덕션 배포 전 반드시 실제 캘리브레이션 과정(3개의 기준색 측정)을 
+            // 거쳐 산출된 고유 역행렬 값으로 교체해야 합니다. 현재는 근사된 임시 행렬입니다.
+            const CALIBRATION_MATRIX = [
+                [ 1.05, -0.02,  0.01], 
+                [-0.01,  1.02, -0.03], 
+                [ 0.02, -0.01,  0.98]  
+            ];
+
+            // 벡터 내적(Dot Product)을 통한 색공간 선형 변환
+            let correctedR = (rawR * CALIBRATION_MATRIX[0][0]) + (rawG * CALIBRATION_MATRIX[1][0]) + (rawB * CALIBRATION_MATRIX[2][0]);
+            let correctedG = (rawR * CALIBRATION_MATRIX[0][1]) + (rawG * CALIBRATION_MATRIX[1][1]) + (rawB * CALIBRATION_MATRIX[2][1]);
+            let correctedB = (rawR * CALIBRATION_MATRIX[0][2]) + (rawG * CALIBRATION_MATRIX[1][2]) + (rawB * CALIBRATION_MATRIX[2][2]);
+
+            // 물리적 색상 한계점 제어 (Clamping to 0~255)
+            correctedR = Math.min(255, Math.max(0, correctedR));
+            correctedG = Math.min(255, Math.max(0, correctedG));
+            correctedB = Math.min(255, Math.max(0, correctedB));
+
+            // 메모리 누수 방지를 위한 OpenCV 객체 명시적 삭제
             src.delete(); gray.delete(); blurred.delete(); clahe.delete(); gray_clahe.delete();
             edges.delete(); kernel.delete(); closed.delete(); contours.delete(); hierarchy.delete(); bestMask.delete();
 
-            return { r: mean[0], g: mean[1], b: mean[2] };
+            // 서버로 전송될 "보정된(Calibrated)" RGB 데이터 반환
+            return { r: correctedR, g: correctedG, b: correctedB };
         }
 
-        // 2. 통합 파이프라인 (추출 -> 서버 전송 -> 시각화)
+        // 2. 통합 파이프라인 (클라이언트 추출 -> 서버 비선형 분석 요청 -> 데이터 시각화)
         async function executeAnalysisPipeline() {
-            if (!cvReady) return alert("OpenCV가 준비되지 않았습니다.");
+            if (!cvReady) return alert("시스템 오류: OpenCV가 초기화되지 않았습니다.");
             
             const newMileage = parseFloat(document.getElementById('mileageInput').value);
             const imgElement = document.getElementById('imagePreview');
             const status = document.getElementById('status');
             
             if (isNaN(newMileage) || imgElement.style.display === 'none') {
-                return alert("주행거리와 영상 샘플을 모두 입력하십시오.");
+                return alert("분석을 수행하기 위해 주행거리와 유효한 영상 샘플이 모두 필요합니다.");
             }
 
-            status.innerText = "상태: 클라이언트에서 광학 데이터 추출 중...";
+            status.innerText = "상태: 기하학적 타겟 분리 및 선형 대수학 기반 광학 보정 중...";
 
             try {
+                // 선형 변환이 완료된 신규 RGB 픽셀 데이터 획득
                 const newRgb = extractRobustRGB(imgElement); 
                 
+                // REST API 페이로드 구성
                 const payload = [
                     ...HISTORICAL_SEED_DATA.map(item => ({...item, isNew: false})),
                     { mileage: newMileage, r: newRgb.r, g: newRgb.g, b: newRgb.b, isNew: true }
                 ];
 
-                status.innerText = "상태: Netlify 백엔드 서버로 분석 요청 중...";
+                status.innerText = "상태: Netlify 백엔드 서버로 L*a*b* 색차 변환 및 다변량 분석 요청 중...";
 
                 const response = await fetch('/.netlify/functions/analyze', {
                     method: 'POST',
@@ -179,23 +211,23 @@
                 
                 if (!response.ok) {
                     const err = await response.json();
-                    throw new Error(err.error || "서버 통신 오류");
+                    throw new Error(err.error || "서버 통신 스트림 오류");
                 }
 
                 const result = await response.json();
 
-                status.innerText = "상태: 서버 분석 완료. 대시보드 렌더링 중...";
+                status.innerText = "상태: 서버 컴퓨팅 완료. 로컬 대시보드 토폴로지 렌더링 중...";
                 renderDashboard(result.data);
                 document.getElementById('chartArea').style.display = 'grid';
-                status.innerText = "상태: 분석 및 시각화 완료.";
+                status.innerText = "상태: 분석 파이프라인이 성공적으로 종료되었습니다.";
 
             } catch (error) {
-                console.error("시스템 오류:", error);
+                console.error("시스템 장애:", error);
                 status.innerText = "분석 실패: " + error.message;
             }
         }
 
-        // 3. 차트 렌더링 및 결과 리포트 출력
+        // 3. 차트 렌더링 (Chart.js 기반 다차원 궤적 시각화)
         function renderDashboard(data) {
             const labels = data.map(d => d.x);
             
@@ -225,11 +257,12 @@
             updateChart('chartL', 'CIE L* (명도 감소 궤적)', data.map(d => d.L), 'L* Value', '#555');
             updateChart('chartA', 'CIE a* (Red/Green 편향)', data.map(d => d.a), 'a* Value', '#d9534f');
             updateChart('chartB', 'CIE b* (Yellow/Blue 편향)', data.map(d => d.b), 'b* Value', '#f0ad4e');
-            updateChart('chartDegradation', '종합 오염도 (Calculated DI)', data.map(d => d.y), 'Degradation Index', '#5cb85c');
+            updateChart('chartDegradation', '종합 오염도 (Calculated DI)', data.map(d => d.y), 'Degradation Index (\u0394E)', '#5cb85c');
 
             generateAnalysisReport(data);
         }
 
+        // 4. 알고리즘 기반 진단 리포트 생성
         function generateAnalysisReport(data) {
             const newSample = data.find(d => d.isNew);
             const historicalData = data.filter(d => !d.isNew);
@@ -238,10 +271,10 @@
             if (!newSample) return;
 
             let html = `<h3>[인공지능 궤적 분석 리포트] 신규 샘플 (주행거리 ${newSample.x.toLocaleString()}km)</h3>`;
-            html += `<p>업로드된 엔진 오일 샘플의 현재 광학적 열화 상태는 <strong>[${newSample.phase}]</strong> 로 판정되었습니다.</p>`;
+            html += `<p>업로드된 엔진 오일 샘플의 현재 광학적 열화 임계 상태는 <strong>[${newSample.phase}]</strong> 로 판정되었습니다.</p>`;
 
             if (newSample.needsReplacement) {
-                html += `<p class="highlight">⚠️ 경고: 다변량 열화 지표가 안전 임계점을 초과했습니다. 엔진 마모 방지를 위해 즉각적인 오일 교체를 강력히 권고합니다.</p>`;
+                html += `<p class="highlight">⚠️ 치명적 경고: 다변량 열화 지표가 기계적 안전 한계선을 초과했습니다. 엔진의 비가역적 마모를 방지하기 위해 즉각적인 오일 교체를 강력히 권고합니다.</p>`;
             }
 
             if (historicalData.length > 0) {
@@ -249,11 +282,11 @@
                 const mileageDiff = Math.abs(newSample.x - nearestSample.x).toLocaleString();
                 const degDiff = (newSample.y - nearestSample.y).toFixed(2);
                 
-                html += `<p><strong>비교 궤적 분석:</strong> 과거 데이터(${nearestSample.x.toLocaleString()}km, 오차 ${mileageDiff}km)와 비교한 결과, `;
+                html += `<p><strong>비교 궤적 분석:</strong> 가장 인접한 과거 노드(${nearestSample.x.toLocaleString()}km, 오차 ${mileageDiff}km)와 데이터 편차를 분석한 결과, `;
                 
-                if (degDiff > 5.0) html += `오염도가 <span class="highlight">비정상적으로 급증(+${degDiff})</span>하였습니다. 블로우바이 가스 유입 등을 점검하십시오.</p>`;
-                else if (degDiff < -2.0) html += `오염도가 이례적으로 감소(${degDiff})하였습니다. 최근 신유를 보충한 이력이 있는지 확인하십시오.</p>`;
-                else html += `오염도 변동폭(${degDiff > 0 ? '+' : ''}${degDiff})이 정상 열화 감쇠 곡선을 안정적으로 추종하고 있습니다.</p>`;
+                if (degDiff > 5.0) html += `오염도가 <span class="highlight">비정상적인 수준으로 급증(+${degDiff})</span>하였습니다. 블로우바이 가스 침투나 열분해(Thermal Breakdown) 여부를 점검하십시오.</p>`;
+                else if (degDiff < -2.0) html += `오염도가 수학적 모델을 이탈하여 감소(${degDiff})하였습니다. 최근 신유(Virgin Oil)를 보충한 이력이 있는지 교차 검증하십시오.</p>`;
+                else html += `오염도 변동폭(${degDiff > 0 ? '+' : ''}${degDiff})이 내장된 정상 열화 감쇠(Decay) 모델을 안정적으로 추종하고 있습니다.</p>`;
             }
 
             reportDiv.innerHTML = html;
