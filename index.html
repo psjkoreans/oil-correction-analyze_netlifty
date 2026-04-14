@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>Engine Oil Analyzer v3.0 (Advanced Visualizer)</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Helvetica Neue', Arial, sans-serif; max-width: 1200px; margin: 20px auto; padding: 20px; background: #f4f7f6; color: #333; }
+        .container { background: white; padding: 25px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .input-group { margin-bottom: 15px; }
+        input[type="number"], input[type="file"] { padding: 8px; margin-right: 10px; border: 1px solid #ccc; border-radius: 4px; }
+        button { padding: 10px 15px; background: #0056b3; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #004494; }
+        #status { margin: 15px 0; font-weight: bold; color: #d9534f; }
+        .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .chart-box { background: #fff; padding: 15px; border: 1px solid #ddd; border-radius: 8px; }
+        .report-box { margin-top: 20px; padding: 20px; background: #e9ecef; border-left: 5px solid #0056b3; border-radius: 4px; line-height: 1.6; }
+        .highlight { font-weight: bold; color: #d9534f; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>엔진 오일 정밀 궤적 분석기 (Data Fusion Architecture)</h2>
+        <div class="input-group">
+            <label for="mileageInput">신규 샘플 주행거리 (km): </label>
+            <input type="number" id="mileageInput" placeholder="예: 60000" required>
+            <input type="file" id="fileInput" accept="image/*" required>
+            <button onclick="analyzeNewSample()">융합 분석 실행</button>
+        </div>
+        <div id="status">대기 중...</div>
+    </div>
+
+    <div class="chart-grid" id="chartArea" style="display: none;">
+        <div class="chart-box"><canvas id="chartL"></canvas></div>
+        <div class="chart-box"><canvas id="chartA"></canvas></div>
+        <div class="chart-box"><canvas id="chartB"></canvas></div>
+        <div class="chart-box"><canvas id="chartDegradation"></canvas></div>
+    </div>
+
+    <div id="analysisReport" class="report-box" style="display: none;"></div>
+
+    <script>
+        // ==========================================
+        // [모듈 1] 시스템 초기화 데이터 (Historical Seed Data)
+        // ==========================================
+        // 주의: 추후 정확한 r, g, b 데이터가 확보되면 아래의 임시값을 갱신하십시오.
+        const HISTORICAL_SEED_DATA = [
+    {
+        "filename": "9141.jpg",
+        "mileage": 5424,
+        "r": 182,
+        "g": 98,
+        "b": 7
+    },
+    {
+        "filename": "9138.jpg",
+        "mileage": 23767,
+        "r": 204,
+        "g": 136,
+        "b": 9
+    },
+    {
+        "filename": "9137.jpg",
+        "mileage": 25112,
+        "r": 228,
+        "g": 148,
+        "b": 13
+    },
+    {
+        "filename": "9139.jpg",
+        "mileage": 25623,
+        "r": 228,
+        "g": 139,
+        "b": 13
+    },
+    {
+        "filename": "9136.jpg",
+        "mileage": 25647,
+        "r": 190,
+        "g": 107,
+        "b": 7
+    },
+    {
+        "filename": "9134.jpg",
+        "mileage": 32600,
+        "r": 190,
+        "g": 107,
+        "b": 7
+    },
+    {
+        "filename": "9135.jpg",
+        "mileage": 34789,
+        "r": 191,
+        "g": 109,
+        "b": 7
+    },
+    {
+        "filename": "9133.jpg",
+        "mileage": 36982,
+        "r": 200,
+        "g": 118,
+        "b": 8
+    },
+    {
+        "filename": "9123.jpg",
+        "mileage": 101100,
+        "r": 76,
+        "g": 7,
+        "b": 1
+    },
+    {
+        "filename": "9122.jpg",
+        "mileage": 108537,
+        "r": 115,
+        "g": 13,
+        "b": 1
+    },
+    {
+        "filename": "9115.jpg",
+        "mileage": 180294,
+        "r": 110,
+        "g": 16,
+        "b": 1
+    }
+];
+
+        let chartInstances = {}; // 차트 객체 초기화 관리를 위한 전역 변수
+
+        // ==========================================
+        // [모듈 2] 클라이언트 측 이미지 연산 (Edge Computing)
+        // ==========================================
+        function extractRGBFromImage(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = function(event) {
+                    const img = new Image();
+                    img.onload = function() {
+                        const canvas = document.createElement('canvas');
+                        const ctx = canvas.getContext('2d');
+                        canvas.width = img.width;
+                        canvas.height = img.height;
+                        ctx.drawImage(img, 0, 0);
+
+                        // 중심 50% 영역 (ROI) 설정
+                        const startX = Math.floor(img.width * 0.25);
+                        const startY = Math.floor(img.height * 0.25);
+                        const roiW = Math.floor(img.width * 0.5);
+                        const roiH = Math.floor(img.height * 0.5);
+
+                        const imageData = ctx.getImageData(startX, startY, roiW, roiH);
+                        const data = imageData.data;
+                        let r = 0, g = 0, b = 0, count = 0;
+
+                        // 픽셀 스캔 및 누적
+                        for (let i = 0; i < data.length; i += 4) {
+                            r += data[i];
+                            g += data[i + 1];
+                            b += data[i + 2];
+                            count++;
+                        }
+
+                        resolve({
+                            R: Math.round(r / count),
+                            G: Math.round(g / count),
+                            B: Math.round(b / count)
+                        });
+                    };
+                    img.onerror = reject;
+                    img.src = event.target.result;
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+            });
+        }
+
+        // ==========================================
+        // [모듈 3] 데이터 융합 및 백엔드 통신 파이프라인
+        // ==========================================
+        async function analyzeNewSample() {
+            const newMileage = parseFloat(document.getElementById('mileageInput').value);
+            const file = document.getElementById('fileInput').files[0];
+            const status = document.getElementById('status');
+            
+            if (isNaN(newMileage) || !file) {
+                return alert("신규 샘플의 주행거리와 이미지를 모두 입력하십시오.");
+            }
+
+            status.innerText = "로컬 이미지 분석 중...";
+
+            try {
+                // 1. 신규 이미지 RGB 추출
+                const newRgb = await extractRGBFromImage(file); 
+                
+                // 2. 신규 데이터 객체 생성
+                const newSampleObject = {
+                    mileage: newMileage,
+                    r: newRgb.R,
+                    g: newRgb.G,
+                    b: newRgb.B,
+                    isNew: true
+                };
+
+                // 3. 과거 데이터(Seed)와 신규 데이터 병합
+                const payload = [
+                    ...HISTORICAL_SEED_DATA.map(item => ({
+                        mileage: item.mileage,
+                        r: item.r,
+                        g: item.g,
+                        b: item.b,
+                        isNew: false
+                    })),
+                    newSampleObject
+                ];
+
+                status.innerText = "서버로 데이터 전송 및 수학적 변환 중...";
+
+                // 4. 서버 통신 (Netlify Function)
+                const response = await fetch('/.netlify/functions/analyze', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+                const text = await response.text();
+                let result;
+                try { 
+                    result = JSON.parse(text); 
+                } catch(e) { 
+                    throw new Error("서버 파싱 오류: " + text.substring(0, 50)); 
+                }
+
+                if (!response.ok) throw new Error(result.error || "서버 통신 오류");
+
+                status.innerText = "분석 완료. 대시보드 렌더링 중...";
+                
+                // 5. 시각화 및 리포트 생성
+                renderDashboard(result.data);
+                status.innerText = "분석이 완료되었습니다.";
+                document.getElementById('chartArea').style.display = 'grid';
+
+            } catch (error) {
+                console.error("시스템 오류:", error);
+                status.innerText = "분석 실패: " + error.message;
+            }
+        }
+
+        // ==========================================
+        // [모듈 4] 동적 시각화 (Chart.js)
+        // ==========================================
+        function renderDashboard(data) {
+            const labels = data.map(d => d.x);
+            
+            // 공통 차트 생성 헬퍼 함수
+            function updateChart(canvasId, label, yData, yAxisLabel, lineColor) {
+                // 기존 차트가 있다면 메모리 누수 방지를 위해 파괴
+                if (chartInstances[canvasId]) chartInstances[canvasId].destroy();
+                
+                // 신규 데이터 강조 로직
+                const pointColors = data.map(d => d.isNew ? '#FF0000' : d.pointColor || '#0056b3');
+                const pointRadii = data.map(d => d.isNew ? 8 : 4);
+                const pointZIndex = data.map(d => d.isNew ? 10 : 1); // 새 샘플을 맨 위로
+
+                chartInstances[canvasId] = new Chart(document.getElementById(canvasId), {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: label,
+                            data: yData,
+                            borderColor: lineColor,
+                            pointBackgroundColor: pointColors,
+                            pointRadius: pointRadii,
+                            pointBorderColor: '#000',
+                            fill: false,
+                            tension: 0.1,
+                            order: pointZIndex // z-index 컨트롤
+                        }]
+                    },
+                    options: { 
+                        responsive: true, 
+                        scales: { 
+                            x: { title: { display: true, text: 'Mileage (km)' } }, 
+                            y: { title: { display: true, text: yAxisLabel } } 
+                        } 
+                    }
+                });
+            }
+
+            // 4개의 다차원 그래프 렌더링
+            updateChart('chartL', 'CIE L* (명도 감소 궤적)', data.map(d => d.L), 'L* Value', '#555');
+            updateChart('chartA', 'CIE a* (Red/Green 편향)', data.map(d => d.a), 'a* Value', '#d9534f');
+            updateChart('chartB', 'CIE b* (Yellow/Blue 편향)', data.map(d => d.b), 'b* Value', '#f0ad4e');
+            updateChart('chartDegradation', '종합 오염도 (Calculated DI)', data.map(d => d.y), 'Degradation Index', '#5cb85c');
+
+            // 텍스트 리포트 생성 호출
+            generateAnalysisReport(data);
+        }
+
+        // ==========================================
+        // [모듈 5] 문맥 기반 텍스트 자동 생성 알고리즘
+        // ==========================================
+        function generateAnalysisReport(data) {
+            const newSample = data.find(d => d.isNew);
+            const historicalData = data.filter(d => !d.isNew);
+            const reportDiv = document.getElementById('analysisReport');
+            
+            if (!newSample) return;
+
+            let html = `<h3>[인공지능 궤적 분석 리포트] 신규 샘플 (주행거리 ${newSample.x.toLocaleString()}km)</h3>`;
+            html += `<p>업로드된 엔진 오일 샘플의 현재 광학적 열화 상태는 <strong>[${newSample.phase}]</strong> 로 판정되었습니다.</p>`;
+
+            // 교체 임계점 도달 여부
+            if (newSample.needsReplacement) {
+                html += `<p class="highlight">⚠️ 경고: 다변량 열화 지표가 안전 임계점을 초과했습니다. 엔진 마모 방지를 위해 즉각적인 오일 교체를 강력히 권고합니다.</p>`;
+            }
+
+            // 과거 데이터와의 시계열 편차 분석
+            if (historicalData.length > 0) {
+                const nearestSample = historicalData.reduce((prev, curr) => 
+                    Math.abs(curr.x - newSample.x) < Math.abs(prev.x - newSample.x) ? curr : prev
+                );
+
+                const mileageDiff = Math.abs(newSample.x - nearestSample.x).toLocaleString();
+                const degDiff = (newSample.y - nearestSample.y).toFixed(2);
+                
+                html += `<p><strong>비교 궤적 분석:</strong> 가장 근접한 과거 데이터(${nearestSample.x.toLocaleString()}km, 오차 ${mileageDiff}km)와 비교한 결과, `;
+                
+                if (newSample.x === nearestSample.x) {
+                    html += `동일 주행거리에서 오염도가 ${degDiff > 0 ? '증가' : '감소'}하였습니다. 측정 환경의 변동이나 엔진 컨디션의 국소적 변화를 점검하십시오.</p>`;
+                } else if (degDiff > 5.0) {
+                    html += `오염도가 <span class="highlight">비정상적으로 급증(+${degDiff})</span>하였습니다. 블로우바이 가스 유입, 수분 혼입, 또는 가혹한 주행 여건이 원인일 수 있습니다.</p>`;
+                } else if (degDiff < -2.0) {
+                    html += `오염도가 이례적으로 감소(${degDiff})하였습니다. 최근 신유를 보충(Top-up)한 이력이 있는지 확인하십시오.</p>`;
+                } else {
+                    html += `오염도 변동폭(${degDiff > 0 ? '+' : ''}${degDiff})이 시스템에 내장된 정상 열화 감쇠(Decay) 곡선을 안정적으로 추종하고 있습니다.</p>`;
+                }
+            }
+
+            reportDiv.innerHTML = html;
+            reportDiv.style.display = 'block';
+        }
+    </script>
+</body>
+</html>
