@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <title>Engine Oil Analyzer v5.1 (Fault-Tolerant Edge Architecture)</title>
+    <title>Engine Oil Analyzer v6.0 (Dynamic Calibration & Cumulative Fusion)</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
     <style>
@@ -25,7 +25,7 @@
 </head>
 <body>
     <div class="container">
-        <h2>엔진 오일 정밀 분석기 (동적 캘리브레이션 및 방어적 통신 모듈)</h2>
+        <h2>엔진 오일 정밀 분석기 (동적 캘리브레이션 및 누적 적분 모델)</h2>
         <p>분석 전 센서 편향성 제거를 위해 측정 환경과 동일한 조건에서 촬영된 R, G, B 기준 이미지를 입력하십시오.</p>
         
         <div class="grid-inputs">
@@ -72,86 +72,20 @@
         let cvReady = false;
         let chartInstances = {};
 
-        //데이터 셋
+        // 데이터 셋
         const HISTORICAL_SEED_DATA = [
-    {
-        "filename": "9141.jpg",
-        "mileage": 5424,
-        "r": 182,
-        "g": 98,
-        "b": 7
-    },
-    {
-        "filename": "9138.jpg",
-        "mileage": 23767,
-        "r": 204,
-        "g": 136,
-        "b": 9
-    },
-    {
-        "filename": "9137.jpg",
-        "mileage": 25112,
-        "r": 228,
-        "g": 148,
-        "b": 13
-    },
-    {
-        "filename": "9139.jpg",
-        "mileage": 25623,
-        "r": 228,
-        "g": 139,
-        "b": 13
-    },
-    {
-        "filename": "9136.jpg",
-        "mileage": 25647,
-        "r": 190,
-        "g": 107,
-        "b": 7
-    },
-    {
-        "filename": "9134.jpg",
-        "mileage": 32600,
-        "r": 190,
-        "g": 107,
-        "b": 7
-    },
-    {
-        "filename": "9135.jpg",
-        "mileage": 34789,
-        "r": 191,
-        "g": 109,
-        "b": 7
-    },
-    {
-        "filename": "9133.jpg",
-        "mileage": 36982,
-        "r": 200,
-        "g": 118,
-        "b": 8
-    },
-    {
-        "filename": "9123.jpg",
-        "mileage": 101100,
-        "r": 76,
-        "g": 7,
-        "b": 1
-    },
-    {
-        "filename": "9122.jpg",
-        "mileage": 108537,
-        "r": 115,
-        "g": 13,
-        "b": 1
-    },
-    {
-        "filename": "9115.jpg",
-        "mileage": 180294,
-        "r": 110,
-        "g": 16,
-        "b": 1
-    }
-];
+            {"filename": "9141.jpg", "mileage": 5424, "r": 182, "g": 98, "b": 7},
+            {"filename": "9138.jpg", "mileage": 23767, "r": 204, "g": 136, "b": 9},
+            {"filename": "9137.jpg", "mileage": 25112, "r": 228, "g": 148, "b": 13},
+            {"filename": "9139.jpg", "mileage": 25623, "r": 228, "g": 139, "b": 13},
+            {"filename": "9136.jpg", "mileage": 25647, "r": 190, "g": 107, "b": 7},
+            {"filename": "9134.jpg", "mileage": 32600, "r": 190, "g": 107, "b": 7},
+            {"filename": "9135.jpg", "mileage": 34789, "r": 191, "g": 109, "b": 7},
+            {"filename": "9133.jpg", "mileage": 36982, "r": 200, "g": 118, "b": 8},
+            {"filename": "9123.jpg", "mileage": 101100, "r": 76, "g": 7, "b": 1},
+            {"filename": "9122.jpg", "mileage": 108537, "r": 115, "g": 13, "b": 1},
+            {"filename": "9115.jpg", "mileage": 180294, "r": 110, "g": 16, "b": 1}
+        ];
 
         function onOpenCvReady() {
             cvReady = true;
@@ -200,7 +134,6 @@
 
         // --- 이미지 프로세싱 모듈 ---
         class ImageProcessor {
-            // 기준 캘리브레이션 이미지는 형태가 없으므로 중앙 50% ROI의 단순 평균 추출
             static getBaselineMean(imageElement) {
                 let src = cv.imread(imageElement);
                 let mask = cv.Mat.zeros(src.rows, src.cols, cv.CV_8UC1);
@@ -220,7 +153,6 @@
                 return [mean[0], mean[1], mean[2]];
             }
 
-            // 오일 샘플은 형태학적 마스킹을 통한 강건한 데이터 추출 수행
             static extractRobustRGB(imageElement) {
                 let src = cv.imread(imageElement);
                 let gray = new cv.Mat();
@@ -341,14 +273,13 @@
                     { mileage: mileage, r: correctedR, g: correctedG, b: correctedB, isNew: true }
                 ];
 
-                // 4단계: 방어적 네트워크 계층 (Fault-Tolerant Fetch)
+                // 4단계: 방어적 네트워크 계층
                 const response = await fetch('/.netlify/functions/analyze', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
                 
-                // [핵심 변경점] 원시 데이터 스트림 우선 수신
                 const rawText = await response.text(); 
 
                 if (!response.ok) {
@@ -357,13 +288,12 @@
                         const errJson = JSON.parse(rawText);
                         trueError = errJson.error || trueError;
                     } catch(e) {
-                        // JSON 파싱 실패 시 HTML/Text 에러 그대로 출력
                         trueError += ` | 서버 원시 응답: ${rawText || '[응답 본문 없음]'}`;
                     }
                     throw new Error(trueError);
                 }
 
-                // 5단계: 응답 무결성 검증 후 JSON 직렬화
+                // 5단계: 응답 무결성 검증 후 직렬화
                 const result = JSON.parse(rawText);
 
                 status.innerText = "상태: 분석 데이터 수신 완료. 토폴로지 렌더링 중...";
@@ -373,7 +303,6 @@
 
             } catch (error) {
                 console.error("시스템 장애 트레이스:", error);
-                // 네트워크 에러의 상세 원인이 화면에 그대로 노출됨
                 status.innerText = "서버 통신 붕괴: " + error.message;
                 status.style.color = "red";
             }
@@ -386,6 +315,10 @@
             function updateChart(canvasId, label, yData, yAxisLabel, lineColor) {
                 if (chartInstances[canvasId]) chartInstances[canvasId].destroy();
                 
+                const pointColors = data.map(d => d.isNew ? '#0000FF' : (d.pointColor || '#555'));
+                const pointRadii = data.map(d => d.isNew ? 8 : 4);
+                const pointZIndex = data.map(d => d.isNew ? 10 : 1);
+
                 chartInstances[canvasId] = new Chart(document.getElementById(canvasId), {
                     type: 'line',
                     data: {
@@ -394,12 +327,12 @@
                             label: label,
                             data: yData,
                             borderColor: lineColor,
-                            pointBackgroundColor: data.map(d => d.isNew ? '#FF0000' : d.pointColor),
-                            pointRadius: data.map(d => d.isNew ? 8 : 4),
+                            pointBackgroundColor: pointColors,
+                            pointRadius: pointRadii,
                             pointBorderColor: '#000',
                             fill: false,
                             tension: 0.1,
-                            order: data.map(d => d.isNew ? 1 : 10) 
+                            order: pointZIndex 
                         }]
                     },
                     options: { responsive: true, scales: { x: { title: { display: true, text: 'Mileage (km)' } }, y: { title: { display: true, text: yAxisLabel } } } }
@@ -409,12 +342,12 @@
             updateChart('chartL', 'CIE L* (명도 감쇠)', data.map(d => d.L), 'L* Value', '#555');
             updateChart('chartA', 'CIE a* (Red/Green 편향)', data.map(d => d.a), 'a* Value', '#d9534f');
             updateChart('chartB', 'CIE b* (Yellow/Blue 편향)', data.map(d => d.b), 'b* Value', '#f0ad4e');
-            updateChart('chartDegradation', '통합 오염도 (EMA Smoothed)', data.map(d => d.y), 'Degradation Index (\u0394E)', '#5cb85c');
+            updateChart('chartDegradation', '통합 오염도 (Cumulative DI)', data.map(d => d.y), 'DI Score', '#5cb85c');
 
             generateAnalysisReport(data);
         }
 
-        // --- 다변량 진단 리포팅 ---
+        // --- 문맥 기반 텍스트 자동 생성 알고리즘 (평문화 적용) ---
         function generateAnalysisReport(data) {
             const newSample = data.find(d => d.isNew);
             const historicalData = data.filter(d => !d.isNew);
@@ -422,23 +355,34 @@
             
             if (!newSample) return;
 
-            let html = `<h3>[인공지능 궤적 분석 리포트] 분석 주행거리: ${newSample.x.toLocaleString()}km</h3>`;
-            html += `<p>업로드된 샘플의 광학적 열화 상태는 센서 보정 결과 <strong>[${newSample.phase}]</strong> 로 판정되었습니다.</p>`;
+            let html = `<h3>[인공지능 엔진 오일 분석 리포트] 측정된 주행거리: ${newSample.x.toLocaleString()} km</h3>`;
+            html += `<p>▶ 현재 오일 상태 판별: <strong style="color:${newSample.pointColor};">${newSample.phase}</strong> (누적 오염도: ${newSample.y.toFixed(2)})</p>`;
 
             if (newSample.needsReplacement) {
-                html += `<p class="highlight">⚠️ 치명적 위협 감지: 열화 지표가 기계적 한계점을 돌파했습니다. 비가역적 엔진 데미지를 막기 위해 즉시 오일을 교체하십시오.</p>`;
+                html += `<p class="highlight">⚠️ 시스템 경고: 오염도가 안전 기준을 초과했습니다. 엔진 보호를 위해 즉시 엔진 오일을 교체하시기 바랍니다.</p>`;
             }
 
             if (historicalData.length > 0) {
-                const nearestSample = historicalData.reduce((prev, curr) => Math.abs(curr.x - newSample.x) < Math.abs(prev.x - newSample.x) ? curr : prev);
-                const mileageDiff = Math.abs(newSample.x - nearestSample.x).toLocaleString();
-                const degDiff = (newSample.y - nearestSample.y).toFixed(2);
+                const nearestSample = historicalData.reduce((prev, curr) => 
+                    Math.abs(curr.x - newSample.x) < Math.abs(prev.x - newSample.x) ? curr : prev
+                );
+
+                const diffMileage = Math.abs(newSample.x - nearestSample.x).toLocaleString();
+                const diffDI = newSample.y - nearestSample.y;
                 
-                html += `<p><strong>다차원 편차 분석:</strong> 근접 과거 데이터(${nearestSample.x.toLocaleString()}km, 오차 ${mileageDiff}km)와 비교 시, `;
+                html += `<p><br><strong>[과거 측정 기록과의 비교 분석]</strong><br>`;
+                html += `▶ 가장 주행거리가 비슷한 과거 기록(${nearestSample.x.toLocaleString()}km, 차이: ${diffMileage}km)과 비교한 결과:</p><ul>`;
                 
-                if (degDiff > 5.0) html += `오염도가 <span class="highlight">비정상적으로 급증(+${degDiff})</span>했습니다. 수분 혼입 또는 가혹 주행 여부를 검증하십시오.</p>`;
-                else if (degDiff < -2.0) html += `오염도가 모델을 벗어나 하락(${degDiff})했습니다. 외부 신유 주입 변수를 배제할 수 없습니다.</p>`;
-                else html += `오염 변동폭(${degDiff > 0 ? '+' : ''}${degDiff})이 수리적 감쇠 모델 내에서 안정적으로 제어되고 있습니다.</p>`;
+                if (newSample.x === nearestSample.x) {
+                    html += `<li>주행거리는 같지만, 오염도는 과거 측정치보다 ${diffDI > 0 ? '증가' : '감소'}했습니다.</li>`;
+                } else if (diffDI > 30.0) {
+                    html += `<li>오염도가 비정상적으로 빠르게 나빠졌습니다(<span class="highlight">+${diffDI.toFixed(2)}</span>). 엔진 부품이 갈려 쇳가루가 섞였거나, 엔진 결함으로 연소 가스(매연)가 오일로 새어 들어갔을 수 있으니 정비소 점검이 필요합니다.</li>`;
+                } else if (diffDI < 0.0) {
+                    html += `<li>오일 상태가 과거 측정 때보다 오히려 더 깨끗해졌습니다(${diffDI.toFixed(2)}). 기계의 측정 오차이거나, 최근에 새 엔진 오일을 추가로 보충(보충유 주입)하셨을 가능성이 있습니다.</li>`;
+                } else {
+                    html += `<li>오염도 증가폭(+${diffDI.toFixed(2)})이 정상적인 오일 노후화 범위 안에 있습니다. 오일 상태가 안정적으로 유지되고 있습니다.</li>`;
+                }
+                html += `</ul>`;
             }
 
             reportDiv.innerHTML = html;
