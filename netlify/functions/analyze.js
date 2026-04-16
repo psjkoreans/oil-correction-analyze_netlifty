@@ -1,8 +1,8 @@
 // netlify/functions/analyze.js
 
 /**
- * sRGB 색공간을 CIE L*a*b* 색공간으로 변환하는 수리적 함수
- * D65 표준 광원을 기준으로 비선형 보정(Gamma Correction) 수행
+ * sRGB 색공간을 비선형 CIE L*a*b* 색공간으로 변환하는 수리적 함수
+ * D65 표준 광원을 기준으로 Gamma Correction 수행
  */
 function rgbToLab(r, g, b) {
     let r_l = r / 255.0, g_l = g / 255.0, b_l = b / 255.0;
@@ -45,80 +45,71 @@ exports.handler = async function(event, context) {
             throw new Error("Invalid payload structure: missing required numerical fields.");
         }
 
-        // 시계열 분석을 위한 주행거리 오름차순 정렬 (O(n log n))
+        // 시계열 분석을 위한 주행거리 기준 오름차순 정렬 (O(n log n))
         payload.sort((a, b) => a.mileage - b.mileage);
 
-        // L*a*b* 벡터 공간 변환
-        const labResults = payload.map(item => ({
-            mileage: item.mileage,
-            isNew: item.isNew || false,
-            ...rgbToLab(item.r, item.g, item.b)
-        }));
+        let cumulative_di = 0.0;
+        const evaluatedData = [];
 
-        // Reference 기준점: 배열의 첫 번째 값 (가장 낮은 주행거리)
-        const ref_L = labResults[0].L;
-        const ref_a = labResults[0].a;
-        const ref_b = labResults[0].b;
+        // 누적 색차 기반 유클리드 거리 적분 및 5단계 상태 기계 산출
+        for (let i = 0; i < payload.length; i++) {
+            let row = payload[i];
+            const lab = rgbToLab(row.r, row.g, row.b);
+            
+            row.L = lab.L;
+            row.a = lab.a;
+            row.b = lab.b;
 
-        let isSaturated = false;
-        let saturatedRawDI = null;
-
-        // Pass 1: 유클리디안 색차(Delta E) 연산 및 L* 포화도 기반 절사
-        const rawData = labResults.map((row) => {
-            let currentPhase = '';
-            let rawDeltaE = Math.sqrt(
-                Math.pow(row.L - ref_L, 2) + Math.pow(row.a - ref_a, 2) + Math.pow(row.b - ref_b, 2)
-            );
-
-            // 명도(L*)가 30.0 미만으로 떨어지면 포화 상태로 간주
-            if (isSaturated || row.L < 30.0) {
-                isSaturated = true;
-                currentPhase = 'Phase 4: 교체 요망 (Replacement Required - Saturated)';
-                if (saturatedRawDI === null) saturatedRawDI = rawDeltaE; 
-                rawDeltaE = saturatedRawDI; 
-            } else if (rawDeltaE < 15.0) {
-                currentPhase = 'Phase 1: 양호 (Normal)';
+            if (i === 0) {
+                cumulative_di = 0.0;
             } else {
-                currentPhase = 'Phase 2/3: 열화 진행 중 (Degradation in Progress)';
+                const prevRow = evaluatedData[i - 1];
+                const delta_e = Math.sqrt(
+                    Math.pow(row.L - prevRow.L, 2) + 
+                    Math.pow(row.a - prevRow.a, 2) + 
+                    Math.pow(row.b - prevRow.b, 2)
+                );
+                cumulative_di += delta_e;
             }
 
-            return { ...row, rawDI: rawDeltaE, phase: currentPhase };
-        });
-
-        // Pass 2: Exponential Moving Average (EMA) 시계열 데이터 평활화
-        const smoothingFactor = 0.5; // alpha 값
-        let smoothedDI = rawData[0].rawDI;
-
-        const evaluatedData = rawData.map((row, index) => {
-            if (index === 0) {
-                smoothedDI = row.rawDI;
+            const is_saturated = row.L < 30.0;
+            
+            let phase, color;
+            if (is_saturated || cumulative_di >= 250.0) {
+                phase = 'Phase 5: 즉시 교체 필요 (Limit Reached)';
+                color = '#000000'; // 검정색
+            } else if (cumulative_di >= 225.0) {
+                phase = 'Phase 4: 심화 열화(교체 필요)';
+                color = '#8B0000'; // 진한 빨간색
+            } else if (cumulative_di >= 200.0) {
+                phase = 'Phase 3: 심화 열화 진행';
+                color = '#FF0000'; // 빨간색
+            } else if (cumulative_di >= 100.0) {
+                phase = 'Phase 2: 열화 진행';
+                color = '#FFA500'; // 주황색
             } else {
-                smoothedDI = (smoothingFactor * row.rawDI) + ((1 - smoothingFactor) * smoothedDI);
+                phase = 'Phase 1: 초기 열화 또는 신유';
+                color = '#FFD700'; // 노란색
             }
 
-            const needsReplacement = row.phase.includes('Phase 4') || smoothedDI >= 45.0;
-            let colorCode = '#0000FF'; 
-            if (needsReplacement) colorCode = '#8B0000'; 
-            else if (row.phase.includes('Phase 2/3')) colorCode = '#FFA500';
-
-            return {
+            evaluatedData.push({
                 x: row.mileage,
-                y: parseFloat(smoothedDI.toFixed(2)),
+                y: parseFloat(cumulative_di.toFixed(2)),
                 L: parseFloat(row.L.toFixed(2)),
                 a: parseFloat(row.a.toFixed(2)),
                 b: parseFloat(row.b.toFixed(2)),
-                phase: row.phase,
-                needsReplacement: needsReplacement,
-                pointColor: colorCode,
-                isNew: row.isNew
-            };
-        });
+                phase: phase,
+                needsReplacement: (is_saturated || cumulative_di >= 250.0),
+                pointColor: color,
+                isNew: row.isNew || false
+            });
+        }
 
         return {
             statusCode: 200,
             headers: { 
                 'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*' // 개발 편의성을 위한 CORS 개방. 프로덕션에서는 도메인 특정 필요
+                'Access-Control-Allow-Origin': '*'
             },
             body: JSON.stringify({ success: true, data: evaluatedData })
         };
